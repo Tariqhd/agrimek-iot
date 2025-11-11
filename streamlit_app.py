@@ -2,81 +2,110 @@ import streamlit as st
 import pandas as pd
 import requests
 import time
+import random
 from datetime import datetime
 
-st.set_page_config(page_title="AgriMek IoT Dashboard", layout="wide")
-st.title("AgriMek — IoT Prototype Dashboard")
-st.write("Dashboard connected to Firebase Realtime Database (REST). Configure your Firebase URL and optional auth token in the sidebar.")
+# -------------------------------
+# 🌿 AgriMek — IoT Prototype Dashboard
+# -------------------------------
 
-# Sidebar - configuration
-st.sidebar.header("Configuration Firebase")
-firebase_url = st.sidebar.text_input("Firebase Realtime DB URL (e.g. https://your-db.firebaseio.com)", value="")
-auth_token = st.sidebar.text_input("Database secret / auth token (optional)", type="password", value="")
-refresh = st.sidebar.slider("Auto-refresh (seconds)", 5, 5, 30, 5)
-st.sidebar.markdown("Instructions: create a Firebase Realtime Database and set rules to allow read for testing or generate a database secret/token. See README.")
+st.set_page_config(page_title="AgriMek — IoT Dashboard", layout="wide")
 
-def fetch_data():
-    if not firebase_url:
-        return pd.DataFrame()
-    url = firebase_url.rstrip('/') + '/sensors.json'
-    params = {}
-    if auth_token:
-        params['auth'] = auth_token
+# --- Sidebar Configuration ---
+st.sidebar.title("Configuration Firebase")
+firebase_url = st.sidebar.text_input(
+    "Firebase Realtime DB URL (e.g. https://your-db.firebaseio.com)",
+    value=""
+)
+auth_token = st.sidebar.text_input("Database secret / auth token (optional)", type="password")
+refresh_interval = st.sidebar.slider("Auto-refresh (seconds)", 5, 60, 30)
+
+# --- Simulate Data Section ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("🧪 Simulation de données (test)")
+
+sim_count = st.sidebar.number_input("Nombre d'envois", min_value=1, max_value=100, value=5)
+sim_delay = st.sidebar.number_input("Délai entre envois (secondes)", min_value=1, max_value=30, value=2)
+
+def simulate_data(firebase_url, count=5, delay_seconds=2):
+    """Simule l'envoi de lectures IoT aléatoires vers Firebase."""
+    st.info("🚀 Simulation démarrée — envoi des données vers Firebase...")
+    for i in range(count):
+        data = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "temperature_C": round(random.uniform(20, 35), 2),
+            "humidity_pct": round(random.uniform(40, 80), 2),
+            "soil_moisture_pct": round(random.uniform(20, 60), 2)
+        }
+        try:
+            response = requests.post(f"{firebase_url.rstrip('/')}/sensors.json", json=data)
+            if response.status_code in (200, 201):
+                st.success(f"✅ Donnée {i+1}/{count} envoyée : {data}")
+            else:
+                st.error(f"⚠️ Erreur {response.status_code}: {response.text}")
+        except Exception as e:
+            st.error(f"❌ Erreur de connexion : {e}")
+        time.sleep(delay_seconds)
+    st.success("🎉 Simulation terminée avec succès !")
+
+if st.sidebar.button("🚀 Simuler des données"):
+    if firebase_url:
+        simulate_data(firebase_url, count=sim_count, delay_seconds=sim_delay)
+    else:
+        st.sidebar.warning("⚠️ Veuillez d'abord entrer votre URL Firebase.")
+
+# --- Fetch Data from Firebase ---
+def fetch_data(firebase_url, auth_token=None):
+    """Récupère les données depuis Firebase Realtime Database."""
     try:
-        r = requests.get(url, params=params, timeout=8)
-        r.raise_for_status()
-        data = r.json()
-        if not data:
+        url = f"{firebase_url.rstrip('/')}/sensors.json"
+        if auth_token:
+            url += f"?auth={auth_token}"
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            if not data:
+                return pd.DataFrame()
+            df = pd.DataFrame(data.values())
+            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+            df.sort_values("timestamp", ascending=False, inplace=True)
+            return df
+        else:
+            st.error(f"Erreur fetch Firebase: {response.status_code} — {response.text}")
             return pd.DataFrame()
-        # data expected as {"timestamp1": {...}, "timestamp2": {...}, ...}
-        items = []
-        for k, v in data.items():
-            # if value already a dict with timestamp field, keep it
-            rec = v.copy()
-            # ensure timestamp parsing
-            if 'timestamp' not in rec:
-                rec['timestamp'] = k
-            items.append(rec)
-        df = pd.DataFrame(items)
-        # normalize column names and types
-        for col in ['soil_moisture_pct','temperature_C','humidity_pct']:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-        df = df.sort_values('timestamp')
-        return df
     except Exception as e:
-        st.sidebar.error(f"Erreur fetch Firebase: {e}")
+        st.error(f"Erreur de connexion Firebase: {e}")
         return pd.DataFrame()
 
-placeholder = st.empty()
+# --- Main Dashboard Layout ---
+st.title("🌿 AgriMek — IoT Prototype Dashboard")
+st.caption("Dashboard connected to Firebase Realtime Database (REST). Configure your Firebase URL and optional auth token in the sidebar.")
 
-while True:
-    df = fetch_data()
-    with placeholder.container():
-        if df.empty:
-            st.info("Aucune donnée trouvée. Envoie des données depuis ESP32 ou tests simulés recommandés.")
-        else:
-            col1, col2 = st.columns([2,1])
-            with col1:
-                st.subheader("Mesures récentes")
-                st.dataframe(df.tail(50).reset_index(drop=True))
-                st.subheader("Graphiques")
-                st.line_chart(df.set_index('timestamp')[['soil_moisture_pct','temperature_C','humidity_pct']].tail(200))
-            with col2:
-                st.subheader("Dernière lecture et recommandation")
-                last = df.dropna(subset=['soil_moisture_pct']).iloc[-1]
-                st.metric("Humidité du sol (%)", f"{last['soil_moisture_pct']}")
-                st.metric("Température (°C)", f"{last.get('temperature_C','N/A')}")
-                st.metric("Humidité (%)", f"{last.get('humidity_pct','N/A')}")
-                # simple rule-based recommendation
-                MOISTURE_THRESHOLD = st.sidebar.number_input('Seuil humidité (%)', 30.0, 5.0, 30.0, 1.0)
-                if last['soil_moisture_pct'] < MOISTURE_THRESHOLD:
-                    deficit = MOISTURE_THRESHOLD - last['soil_moisture_pct']
-                    liters = round(0.5 + 0.1*deficit, 2)
-                    st.warning(f"Recommandation: Arroser ~{liters} L/m² (humidité basse)")
-                else:
-                    st.success("Etat: OK — Pas d'arrosage requis")
-        st.write('---')
-        st.write(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-    time.sleep(refresh)
+if firebase_url:
+    placeholder = st.empty()
+
+    while True:
+        df = fetch_data(firebase_url, auth_token)
+
+        with placeholder.container():
+            if not df.empty:
+                st.subheader("📊 Mesures récentes")
+                st.dataframe(df[["humidity_pct", "soil_moisture_pct", "temperature_C", "timestamp"]].head(10))
+
+                last_row = df.iloc[0]
+                st.subheader("🧭 Dernière lecture et recommandation")
+
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Humidité du sol (%)", f"{last_row['soil_moisture_pct']}")
+                col2.metric("Température (°C)", f"{last_row['temperature_C']}")
+                col3.metric("Humidité (%)", f"{last_row['humidity_pct']}")
+
+                st.subheader("📈 Graphiques")
+                st.line_chart(df[["temperature_C", "humidity_pct", "soil_moisture_pct"]].set_index("timestamp"))
+            else:
+                st.warning("Aucune donnée trouvée. Envoie des données depuis ESP32 ou utilise la simulation.")
+
+            st.markdown(f"⏱️ Dernière mise à jour : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        time.sleep(refresh_interval)
+else:
+    st.info("👉 Entrez votre URL Firebase pour démarrer le tableau de bord.")
